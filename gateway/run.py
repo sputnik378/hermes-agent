@@ -3631,6 +3631,36 @@ class GatewayRunner:
                 except Exception:
                     providers = []
 
+                # Inject Codex (OAuth — credentials checked via hermes login, not env vars)
+                if not any(p['slug'] == 'openai-codex' for p in providers):
+                    providers.append({
+                        'slug': 'openai-codex',
+                        'name': 'OpenAI Codex',
+                        'is_current': current_provider == 'openai-codex',
+                        'is_user_defined': False,
+                        'models': ['codex'],
+                        'total_models': 1,
+                        'source': 'hermes',
+                    })
+
+                # Inject local Gemma if configured in model_aliases
+                try:
+                    from hermes_cli.config import load_config
+                    cfg = load_config()
+                    aliases = cfg.get('model_aliases') or {}
+                    if 'local_gemma' in aliases:
+                        providers.append({
+                            'slug': 'local_gemma',
+                            'name': 'Gemma IT Q5 (Local)',
+                            'is_current': current_provider == 'local_gemma',
+                            'is_user_defined': False,
+                            'models': ['local_gemma'],
+                            'total_models': 1,
+                            'source': 'hermes',
+                        })
+                except Exception:
+                    pass
+
                 if providers:
                     # Build a callback closure for when the user picks a model.
                     # Captures self + locals needed for the switch logic.
