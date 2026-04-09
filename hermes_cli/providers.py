@@ -485,7 +485,25 @@ def resolve_provider_full(
         if user_pdef is not None:
             return user_pdef
 
-    # 3. Try models.dev directly (for providers not in our ALIASES)
+    # 3. Check model_aliases for a custom provider entry (e.g. local_gemma)
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        aliases = cfg.get("model_aliases") or {}
+        entry = aliases.get(name) or aliases.get(canonical)
+        if isinstance(entry, dict) and entry.get("provider") == "custom" and entry.get("base_url"):
+            return ProviderDef(
+                id=name,
+                name=entry.get("name", name),
+                transport="openai_chat",
+                api_key_env_vars=[],
+                base_url=entry["base_url"],
+                source="model_alias",
+            )
+    except Exception:
+        pass
+
+    # 4. Try models.dev directly (for providers not in our ALIASES)
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
         mdev_info = _mdev_provider(canonical)

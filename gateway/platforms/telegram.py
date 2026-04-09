@@ -1496,10 +1496,23 @@ class TelegramAdapter(BasePlatformAdapter):
     async def send_model_picker(
         self,
         chat_id: str,
+        providers: list = None,
         current_model: str = "",
-        reply_to_message_id: Optional[str] = None,
+        current_provider: str = "",
+        session_key: str = "",
+        on_model_selected=None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send an inline-keyboard model picker with free-model buttons."""
+        """Send an inline-keyboard model picker with free-model buttons.
+
+        Supports two calling conventions:
+        - Old (no providers):  send_model_picker(chat_id, current_model, reply_to_message_id)
+        - New (providers):     send_model_picker(chat_id, providers, current_model, ...)
+        """
+        # Backward compat: if providers is a string, treat it as current_model (old call)
+        if isinstance(providers, str):
+            current_model = providers
+            providers = None
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
@@ -1525,13 +1538,17 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         keyboard = InlineKeyboardMarkup(keyboard_rows)
 
+        # Support reply_to_message_id from metadata (new style) or direct kwarg (old compat)
+        reply_to = None
+        if metadata and metadata.get("reply_to_message_id"):
+            reply_to = int(metadata["reply_to_message_id"])
         try:
             msg = await self._bot.send_message(
                 chat_id=int(chat_id),
                 text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=keyboard,
-                reply_to_message_id=int(reply_to_message_id) if reply_to_message_id else None,
+                reply_to_message_id=reply_to,
             )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
