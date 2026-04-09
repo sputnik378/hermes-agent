@@ -540,17 +540,31 @@ def switch_model(
                 # Only convert when there's no slash — a slash means the name
                 # is already in vendor/model format and the colon is a variant
                 # tag (:free, :extended, :fast) that must be preserved.
+                # (skip this if the colon is an OpenRouter routing suffix like :free)
                 colon_pos = raw_input.find(":")
                 if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
                     left = raw_input[:colon_pos].strip().lower()
                     right = raw_input[colon_pos + 1:].strip()
                     if left and right:
-                        # Colons become slashes for aggregator slugs
-                        new_model = f"{left}/{right}"
-                        logger.debug(
-                            "Converted vendor:model '%s' to aggregator slug '%s'",
-                            raw_input, new_model,
+                        # Detect OpenRouter routing suffixes (free, extended, fast, thinking, reasoning)
+                        rl = right.lower()
+                        is_routing_suffix = (
+                            rl in {"free", "extended", "fast", "thinking", "reasoning"}
+                            or rl.startswith("thinking ")
+                            or rl.startswith("reasoning ")
                         )
+                        if not is_routing_suffix:
+                            # Colons become slashes for aggregator slugs
+                            new_model = f"{left}/{right}"
+                            logger.debug(
+                                "Converted vendor:model '%s' to aggregator slug '%s'",
+                                raw_input, new_model,
+                            )
+                        else:
+                            logger.debug(
+                                "Skipped conversion for OpenRouter routing suffix in '%s'",
+                                raw_input,
+                            )
 
         # --- Step d: Aggregator catalog search ---
         if is_aggregator(target_provider) and not resolved_alias:

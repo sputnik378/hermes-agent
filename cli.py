@@ -1559,6 +1559,10 @@ class HermesCLI:
         self.preloaded_skills: list[str] = []
         self._startup_skills_line_shown = False
 
+        # Inline model picker state (activated by /model with no args)
+        self._model_picker_active = False
+        self._model_picker_options: list[tuple[str, str]] = []  # (model_id, label)
+
         # Voice mode state (also reinitialized inside run() for interactive TUI).
         self._voice_lock = threading.Lock()
         self._voice_mode = False
@@ -3775,57 +3779,39 @@ class HermesCLI:
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
 
-        # No args at all: show available providers + models
+        # No args at all: show inline model picker and enter picker mode
         if not model_input and not explicit_provider:
+            # Free models list (mirrors telegram.py FREE_MODELS)
+            FREE_MODEL_OPTIONS = [
+                ("qwen/qwen3.6-plus:free",                "Qwen 3.6+ Free"),
+                ("nvidia/nemotron-3-nano-30b-a3b:free",  "Nemotron Nano 30B"),
+                ("liquid/lfm-2.5-1.2b-thinking:free",      "LFM 2.5 1.2B"),
+                ("google/gemini-3-flash-preview",          "Gemini 3 Flash"),
+                ("google/gemini-3.1-flash-lite-preview",  "Gemini 3.1 Flash Lite"),
+                ("nvidia/nemotron-3-super-120b-a12b:free","Nemotron 120B"),
+                ("arcee-ai/trinity-large-preview:free",   "Trinity Large"),
+                ("minimax/minimax-m2.7",                  "MiniMax 2.7 ★"),
+            ]
+
             model_display = self.model or "unknown"
             provider_display = get_label(self.provider) if self.provider else "unknown"
-            _cprint(f"  Current: {model_display} on {provider_display}")
+            _cprint(f"  ⚕ Model Picker  (current: `{model_display}`)")
+            _cprint("  " + "─" * 52)
+            for i, (model_id, label) in enumerate(FREE_MODEL_OPTIONS, 1):
+                is_current = model_display.strip("'\"") == model_id
+                star = "  ★" if is_current else ""
+                _cprint(f"    {i}. {label:<32} {model_id}{star}")
             _cprint("")
-
-            # Show authenticated providers with top models
-            try:
-                # Load user providers from config
-                user_provs = None
-                try:
-                    from hermes_cli.config import load_config
-                    cfg = load_config()
-                    user_provs = cfg.get("providers")
-                except Exception:
-                    pass
-
-                providers = list_authenticated_providers(
-                    current_provider=self.provider or "",
-                    user_providers=user_provs,
-                    max_models=6,
-                )
-                if providers:
-                    for p in providers:
-                        tag = " (current)" if p["is_current"] else ""
-                        _cprint(f"  {p['name']} [--provider {p['slug']}]{tag}:")
-                        if p["models"]:
-                            model_strs = ", ".join(p["models"])
-                            extra = f"  (+{p['total_models'] - len(p['models'])} more)" if p["total_models"] > len(p["models"]) else ""
-                            _cprint(f"    {model_strs}{extra}")
-                        elif p.get("api_url"):
-                            _cprint(f"    {p['api_url']} (use /model <name> --provider {p['slug']})")
-                        else:
-                            _cprint(f"    (no models listed)")
-                        _cprint("")
-                else:
-                    _cprint("  No authenticated providers found.")
-                    _cprint("")
-            except Exception:
-                pass
-
-            # Aliases
-            from hermes_cli.model_switch import MODEL_ALIASES
-            alias_list = ", ".join(sorted(MODEL_ALIASES.keys()))
-            _cprint(f"  Aliases: {alias_list}")
+            _cprint(f"    0. Cancel")
             _cprint("")
+            _cprint("  Type a number to switch, or any model name directly.")
             _cprint("  /model <name>                        switch model")
             _cprint("  /model <name> --provider <slug>      switch provider")
             _cprint("  /model <name> --global               persist to config")
-            return
+            # Activate picker mode — next non-slash input is treated as a selection
+            self._model_picker_active = True
+            self._model_picker_options = FREE_MODEL_OPTIONS
+            return True  # command handled; don't treat as regular message
 
         # Perform the switch
         result = switch_model(
@@ -8307,6 +8293,33 @@ class HermesCLI:
                                 f"[User attached file: {_drop_path}]"
                                 + (f"\n{_remainder}" if _remainder else "")
                             )
+
+                    # Intercept: if model picker is active, treat numeric/bare input as selection
+                    if (self._model_picker_active
+                        and isinstance(user_input, str)
+                        and not _looks_like_slash_command(user_input)):
+                        self._model_picker_active = False
+                        choice = user_input.strip()
+                        if choice == "0" or choice == "":
+                            _cprint("  ✗ Model selection cancelled.")
+                            continue
+                        # Check if it's a number matching our list
+                        try:
+                            idx = int(choice) - 1
+                            if 0 <= idx < len(self._model_picker_options):
+                                selected_id, selected_label = self._model_picker_options[idx]
+                                # Defer to the normal switch logic with the selected model
+                                _cprint(f"  ⚕ Selecting: {selected_label}...")
+                                # Build a synthetic /model command and process it
+                                synthetic_cmd = f"/model {selected_id}"
+                                self._handle_model_switch(synthetic_cmd)
+                                continue
+                        except ValueError:
+                            pass
+                        # Not a valid number — fall through to regular handling
+                        _cprint("  ⚠ Invalid selection. Enter a number from the list, a model name, or a slash command.")
+                        self._model_picker_active = True  # stay in picker mode
+                        continue
 
                     if not _file_drop and isinstance(user_input, str) and _looks_like_slash_command(user_input):
                         _cprint(f"\n⚙️  {user_input}")

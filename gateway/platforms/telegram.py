@@ -122,6 +122,17 @@ class TelegramAdapter(BasePlatformAdapter):
     # Telegram message limits
     MAX_MESSAGE_LENGTH = 4096
     MEDIA_GROUP_WAIT_SECONDS = 0.8
+
+    # Free models shown in the inline model picker
+    FREE_MODELS = [
+        ("qwen/qwen3.6-plus:free",                "Qwen 3.6+ Free"),
+        ("nvidia/nemotron-3-nano-30b-a3b:free",   "Nemotron Nano 30B"),
+        ("liquid/lfm-2.5-1.2b-thinking:free",     "LFM 2.5 1.2B"),
+        ("google/gemini-3-flash-preview",          "Gemini 3 Flash"),
+        ("google/gemini-3.1-flash-lite-preview",  "Gemini 3.1 Flash Lite"),
+        ("codex",                                 "OpenAI Codex"),
+        ("local_gemma",                            "Gemma IT Q5 (Local)"),
+    ]
     
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.TELEGRAM)
@@ -1380,7 +1391,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         data = query.data
 
-        # --- Model picker callbacks ---
+        # --- Model picker callbacks (new paginated system) ---
         if data.startswith(("mp:", "mm:", "mb", "mx", "mg:")):
             chat_id = str(query.message.chat_id) if query.message else None
             if chat_id:
@@ -1437,7 +1448,22 @@ class TelegramAdapter(BasePlatformAdapter):
                     logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
             return
 
-        # --- Update prompt callbacks ---
+        # --- Old model_select: callbacks (simple FREE_MODELS picker) ---
+        if data.startswith("model_select:"):
+            action = data.split(":", 1)[1]
+            if action == "cancel":
+                await query.answer(text="Cancelled.", show_alert=False)
+                try:
+                    await query.edit_message_text(
+                        text="⚕ _Model selection cancelled._",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+            else:
+                await self._handle_model_select_callback(query, action)
+            return
         if not data.startswith("update_prompt:"):
             return
         answer = data.split(":", 1)[1]  # "y" or "n"
@@ -1464,6 +1490,104 @@ class TelegramAdapter(BasePlatformAdapter):
                         answer, getattr(query.from_user, "id", "unknown"))
         except Exception as exc:
             logger.error("Failed to write update response from callback: %s", exc)
+
+    # ── Model picker ─────────────────────────────────────────────────────────
+
+    async def send_model_picker(
+        self,
+        chat_id: str,
+        current_model: str = "",
+        reply_to_message_id: Optional[str] = None,
+    ) -> SendResult:
+        """Send an inline-keyboard model picker with free-model buttons."""
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        # Build 2-column keyboard grid
+        keyboard_rows = []
+        row = []
+        for model_id, label in self.FREE_MODELS:
+            is_current = current_model and current_model.strip("'\"") == model_id
+            display = f"{'★ ' if is_current else ''}{label}"
+            row.append(InlineKeyboardButton(display, callback_data=f"model_select:{model_id}"))
+            if len(row) == 2:
+                keyboard_rows.append(row)
+                row = []
+        if row:
+            keyboard_rows.append(row)
+        keyboard_rows.append([
+            InlineKeyboardButton("✗ Cancel", callback_data="model_select:cancel"),
+        ])
+
+        text = (
+            f"⚕ *Select Model*  _(current: `{current_model}`)_\n\n"
+            "Tap a model to switch instantly:"
+        )
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+        try:
+            msg = await self._bot.send_message(
+                chat_id=int(chat_id),
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=keyboard,
+                reply_to_message_id=int(reply_to_message_id) if reply_to_message_id else None,
+            )
+            return SendResult(success=True, message_id=str(msg.message_id))
+        except Exception as e:
+            logger.warning("[%s] send_model_picker failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def _handle_model_select_callback(self, query, model_id: str) -> None:
+        """Handle a model_select: callback — switch model and update message."""
+        gateway = getattr(self, "_gateway", None)
+        if not gateway:
+            await query.answer(text="Gateway reference missing.", show_alert=True)
+            return
+
+        from gateway.session import SessionSource
+
+        # Synthesize a MessageEvent for /model <id>
+        class FakeEvent:
+            def __init__(self, source, text):
+                self.source = source
+                self.text = text
+                self.message_type = "command"
+                self.thread_id = None
+            def get_command_args(self):
+                return self.text
+            def get_command(self):
+                return "model"
+
+        user_id = str(getattr(query.from_user, "id", ""))
+        user_name = getattr(query.from_user, "first_name", "") or ""
+        chat_id = str(getattr(query.message, "chat_id", user_id))
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_name=user_name,
+            chat_type="dm",
+        )
+        fake_event = FakeEvent(source=source, text=model_id)
+
+        try:
+            result_text = await gateway._handle_model_command(fake_event)
+        except Exception as exc:
+            result_text = f"⚠️ Switch failed: {exc}"
+            logger.error("Model select callback error: %s", exc)
+
+        await query.answer(text=f"Switched to {model_id}", show_alert=False)
+        try:
+            await query.edit_message_text(
+                text=f"⚕ *Model:* `{model_id}`\n\n{result_text[:2000]}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+    # ── Update-prompt callbacks ───────────────────────────────────────────────
 
     async def send_voice(
         self,

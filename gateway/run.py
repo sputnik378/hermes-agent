@@ -780,6 +780,42 @@ class GatewayRunner:
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
+    def _apply_pending_model_switch(self, session_key: str) -> None:
+        """Apply a pending session model switch from the Telegram inline picker.
+
+        Checks for ~/.hermes/.pending_model_switch written by the Telegram
+        adapter's model-picker callback, and applies it to this gateway's
+        session overrides if the session_key matches.
+        """
+        import json
+        try:
+            pending_path = _hermes_home / ".pending_model_switch"
+            if not pending_path.exists():
+                return
+            data = json.loads(pending_path.read_text())
+            pending_key = data.get("session_key", "")
+            # Only apply if the session key matches this message's session
+            if pending_key and pending_key != session_key:
+                return
+            overrides = getattr(self, "_session_model_overrides", None)
+            if overrides is not None:
+                overrides[session_key] = {
+                    "model": data.get("model", ""),
+                    "provider": data.get("provider", ""),
+                    "api_key": data.get("api_key", ""),
+                    "base_url": data.get("base_url", ""),
+                    "api_mode": data.get("api_mode", ""),
+                }
+            notes = getattr(self, "_pending_model_notes", None)
+            if notes is not None:
+                notes[session_key] = (
+                    f"[Note: model was just switched to {data.get('model', '')}. "
+                    "Adjust your self-identification accordingly.]"
+                )
+            pending_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         from agent.smart_model_routing import resolve_turn_route
 
@@ -1128,6 +1164,7 @@ class GatewayRunner:
             adapter.set_message_handler(self._handle_message)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
+            adapter._gateway = self  # For callbacks that need gateway reference
             
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
@@ -1780,17 +1817,22 @@ class GatewayRunner:
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
-        
+
         This is the core message processing pipeline:
-        1. Check user authorization
-        2. Check for commands (/new, /reset, etc.)
-        3. Check for running agent and interrupt if needed
-        4. Get or create session
-        5. Build context for agent
-        6. Run agent conversation
-        7. Return response
+        1. Check for pending Telegram model picker switch
+        2. Check user authorization
+        3. Check for commands (/new, /reset, etc.)
+        4. Check for running agent and interrupt if needed
+        5. Get or create session
+        6. Build context for agent
+        7. Run agent conversation
+        8. Return response
         """
         source = event.source
+        session_key = self._session_key_for_source(source)
+
+        # 1. Apply any pending Telegram model picker switch
+        self._apply_pending_model_switch(session_key)
 
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
@@ -6033,16 +6075,14 @@ class GatewayRunner:
                 return f"{disabled_note}\n\n{user_text}"
             return disabled_note
 
-        from tools.transcription_tools import transcribe_audio, get_stt_model_from_config
+        from tools.transcription_tools import transcribe_audio
         import asyncio
-
-        stt_model = get_stt_model_from_config()
 
         enriched_parts = []
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
-                result = await asyncio.to_thread(transcribe_audio, path, model=stt_model)
+                result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
                     enriched_parts.append(

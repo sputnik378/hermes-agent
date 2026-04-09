@@ -868,6 +868,93 @@ def cmd_model(args):
     select_provider_and_model(args=args)
 
 
+# Free models shown in the quick picker ( mirrors telegram.py FREE_MODELS )
+FREE_MODELS_CLI = [
+    ("qwen/qwen3.6-plus:free",                "Qwen 3.6+ Free"),
+    ("nvidia/nemotron-3-nano-30b-a3b:free",  "Nemotron Nano 30B"),
+    ("liquid/lfm-2.5-1.2b-thinking:free",      "LFM 2.5 1.2B"),
+    ("google/gemini-3-flash-preview",          "Gemini 3 Flash"),
+    ("google/gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash Lite"),
+    ("nvidia/nemotron-3-super-120b-a12b:free","Nemotron 120B"),
+    ("arcee-ai/trinity-large-preview:free",   "Trinity Large"),
+    ("minimax/minimax-m2.7",                  "MiniMax 2.7 ★"),
+    ("codex",                                 "OpenAI Codex"),
+    ("local_gemma",                            "Gemma IT Q5 (Local)"),
+]
+
+
+def cmd_free_models(args):
+    """Quick free-model picker — no TTY required."""
+    from hermes_cli.model_switch import switch_model, parse_model_flags
+    from hermes_cli.config import load_config
+
+    config = load_config()
+    current_model = ""
+    current_provider = "openrouter"
+    model_cfg = config.get("model", {})
+    if isinstance(model_cfg, dict):
+        current_model = model_cfg.get("default") or model_cfg.get("name") or ""
+        current_provider = model_cfg.get("provider", current_provider)
+    elif isinstance(model_cfg, str):
+        current_model = model_cfg
+
+    print()
+    print("  Free OpenRouter Models")
+    print("  " + "─" * 50)
+    for i, (model_id, label) in enumerate(FREE_MODELS_CLI, 1):
+        mark = "  ← current" if current_model == model_id else ""
+        print(f"  {i}. {label:<30} {model_id}{mark}")
+    print()
+    print(f"  0. Cancel")
+    print()
+
+    # --list just shows the table and exits
+    if getattr(args, "list_only", False):
+        return
+
+    try:
+        choice = input("Pick a number [1-{}]: ".format(len(FREE_MODELS_CLI))).strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled.")
+        return
+
+    if not choice or choice == "0":
+        print("No change.")
+        return
+
+    try:
+        idx = int(choice) - 1
+        if idx < 0 or idx >= len(FREE_MODELS_CLI):
+            raise ValueError()
+        selected_id, selected_label = FREE_MODELS_CLI[idx]
+    except ValueError:
+        print(f"Invalid selection: {choice!r}")
+        return
+
+    is_global = getattr(args, "global_persist", False)
+
+    result = switch_model(
+        raw_input=selected_id,
+        current_provider=current_provider,
+        current_model=current_model,
+        current_base_url="",
+        current_api_key="",
+        is_global=is_global,
+        explicit_provider=None,
+    )
+
+    if result.success:
+        if is_global:
+            from hermes_cli.auth import _save_model_choice
+            _save_model_choice(result.new_model)
+        scope = " (global)" if is_global else " (session only)"
+        print(f"\n  Switched to {selected_label}{scope}")
+        if is_global:
+            print("  Persisted to config.yaml")
+    else:
+        print(f"\n  Error: {result.error_message}")
+
+
 def select_provider_and_model(args=None):
     """Core provider selection + model picking logic.
 
@@ -4408,6 +4495,24 @@ For more help on a command:
         help="Disable TLS verification for Nous login (testing only)"
     )
     model_parser.set_defaults(func=cmd_model)
+
+    # =========================================================================
+    # models command
+    # =========================================================================
+    free_models_parser = subparsers.add_parser(
+        "models",
+        help="Switch to a free model (quick picker)",
+        description="Quickly switch between free OpenRouter models"
+    )
+    free_models_parser.add_argument(
+        "--global", dest="global_persist", action="store_true",
+        help="Persist the selection as the default for all sessions"
+    )
+    free_models_parser.add_argument(
+        "--list", dest="list_only", action="store_true",
+        help="Just list the free models without prompting"
+    )
+    free_models_parser.set_defaults(func=cmd_free_models)
 
     # =========================================================================
     # gateway command
