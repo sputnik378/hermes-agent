@@ -1864,6 +1864,12 @@ def cmd_proxy(args):
         raise SystemExit(rc)
 
 
+def cmd_webui(args):
+    """Hermes WebUI sidecar management."""
+    from hermes_cli.webui import webui_command
+    webui_command(args)
+
+
 def cmd_whatsapp(args):
     """Set up WhatsApp: choose mode, configure, install bridge, pair via QR."""
     _require_tty("whatsapp")
@@ -11708,6 +11714,25 @@ def main():
         "providers", help="List available proxy upstream providers"
     )
     proxy_parser.set_defaults(func=cmd_proxy)
+
+    # =========================================================================
+    # webui command (Matt customization — nesquena/hermes-webui sidecar)
+    # =========================================================================
+    webui_parser = subparsers.add_parser(
+        "webui",
+        help="Manage the Hermes WebUI sidecar",
+        description="Install, start, stop, and inspect the localhost-only Hermes WebUI sidecar",
+    )
+    webui_subparsers = webui_parser.add_subparsers(dest="webui_command")
+    webui_install = webui_subparsers.add_parser("install", help="Clone or update the Hermes WebUI repo")
+    webui_install.add_argument("--update", action="store_true", help="Pull latest if already installed")
+    webui_start = webui_subparsers.add_parser("start", help="Start the Hermes WebUI sidecar")
+    webui_start.add_argument("--update", action="store_true", help="Pull latest before starting")
+    webui_start.add_argument("--open", action="store_true", help="Open WebUI in browser after startup")
+    webui_subparsers.add_parser("stop", help="Stop the Hermes WebUI sidecar")
+    webui_subparsers.add_parser("status", help="Show Hermes WebUI + API server status")
+    webui_parser.set_defaults(func=cmd_webui)
+
     gateway_parser.set_defaults(func=cmd_gateway)
 
     # =========================================================================
