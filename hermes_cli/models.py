@@ -11,6 +11,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 import time
 from difflib import get_close_matches
 from pathlib import Path
@@ -2875,6 +2876,33 @@ def probe_api_models(
         headers["Authorization"] = f"Bearer {api_key}"
     if normalized.startswith(COPILOT_BASE_URL):
         headers.update(copilot_default_headers())
+
+    codex_root = "https://chatgpt.com/backend-api/codex"
+    codex_candidates = {codex_root, f"{codex_root}/v1"}
+    if normalized in codex_candidates:
+        params = urllib.parse.urlencode({"client_version": "1.0.0"})
+        url = f"{codex_root}/models?{params}"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+                entries = data.get("models", []) if isinstance(data, dict) else []
+                models_out: list[str] = []
+                for item in entries:
+                    if not isinstance(item, dict):
+                        continue
+                    slug = str(item.get("slug") or "").strip()
+                    if not slug:
+                        continue
+                    if item.get("supported_in_api") is False:
+                        continue
+                    if str(item.get("visibility") or "").strip().lower() in {"hide", "hidden"}:
+                        continue
+                    if slug not in models_out:
+                        models_out.append(slug)
+                return {"models": models_out, "probed_url": url, "resolved_base_url": codex_root, "suggested_base_url": None, "used_fallback": False}
+        except Exception:
+            return {"models": None, "probed_url": url, "resolved_base_url": codex_root, "suggested_base_url": None, "used_fallback": False}
 
     for candidate_base, is_fallback in candidates:
         url = candidate_base.rstrip("/") + "/models"

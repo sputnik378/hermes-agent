@@ -616,6 +616,11 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._run_tasks: Dict[str, Any] = {}
+        self._run_agents: Dict[str, Any] = {}
+        self._run_approval_sessions: Dict[str, str] = {}
+        self._run_pending_approvals: Dict[str, Dict[str, Any]] = {}
+        self._run_pending_clarify: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -3285,6 +3290,169 @@ class APIServerAdapter(BasePlatformAdapter):
                 pass
 
         return web.json_response({"run_id": run_id, "status": "stopping"})
+
+    async def _handle_list_skills(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from tools.skills_tool import skills_list
+            raw = skills_list()
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return web.json_response({"skills": data.get("skills", [])})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to list skills: {exc}", code="skills_list_failed"), status=500)
+
+    async def _handle_skill_content(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        name = str(request.query.get("name") or "").strip()
+        if not name:
+            return web.json_response(_openai_error("name required", code="missing_name"), status=400)
+        file_path = str(request.query.get("file") or "").strip() or None
+        try:
+            from tools.skills_tool import skill_view
+            raw = skill_view(name, file_path=file_path)
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return web.json_response(data)
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to load skill content: {exc}", code="skill_view_failed"), status=500)
+
+    async def _handle_skill_save(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON body", code="invalid_body"), status=400)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return web.json_response(_openai_error("name required", code="missing_name"), status=400)
+        content = str(body.get("content") or "").strip()
+        category = str(body.get("category") or "").strip() or None
+        try:
+            from tools.skill_manage import skill_manage
+            result = skill_manage(action="write_file", name=name, content=content, category=category)
+            return web.json_response({"success": True, "name": name, "result": result})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to save skill: {exc}", code="skill_save_failed"), status=500)
+
+    async def _handle_skill_delete(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON body", code="invalid_body"), status=400)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return web.json_response(_openai_error("name required", code="missing_name"), status=400)
+        try:
+            from tools.skill_manage import skill_manage
+            result = skill_manage(action="delete", name=name)
+            return web.json_response({"success": True, "name": name, "result": result})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to delete skill: {exc}", code="skill_delete_failed"), status=500)
+
+    async def _handle_list_profiles(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from hermes_cli.profiles import _get_default_hermes_home, _get_profiles_root, profile_exists, get_active_profile_name
+            base = _get_default_hermes_home()
+            root = _get_profiles_root()
+            active = get_active_profile_name()
+            profiles = []
+            if root.is_dir():
+                for entry in root.iterdir():
+                    if entry.is_dir() and profile_exists(entry.name):
+                        profiles.append({"name": entry.name, "path": str(entry)})
+            if not any(p["name"] == "default" for p in profiles):
+                profiles.insert(0, {"name": "default", "path": str(base)})
+            return web.json_response({"profiles": profiles, "active": active})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to list profiles: {exc}", code="profiles_list_failed"), status=500)
+
+    async def _handle_active_profile(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from hermes_cli.profiles import get_active_profile_name, _get_default_hermes_home, _get_profiles_root
+            name = get_active_profile_name()
+            if name == "default":
+                home = _get_default_hermes_home()
+            else:
+                home = _get_profiles_root() / name
+            return web.json_response({"active": name, "home": str(home)})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to get active profile: {exc}", code="active_profile_failed"), status=500)
+
+    async def _handle_list_sessions(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from hermes_state import SessionDB
+            rows = SessionDB().search_sessions("", limit=50, offset=0)
+            return web.json_response({"sessions": [{"session_id": r.get("session_id",""), "title": r.get("title",""), "created_at": r.get("created_at",0), "updated_at": r.get("updated_at",0)} for r in (rows or [])]})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to list sessions: {exc}", code="sessions_list_failed"), status=500)
+
+    async def _handle_list_crons(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from cron.jobs import list_jobs
+            raw = list_jobs()
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            return web.json_response(data)
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to list crons: {exc}", code="crons_list_failed"), status=500)
+
+    async def _handle_onboarding_status(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            import os
+            configured = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY"))
+            return web.json_response({"configured": configured, "available_models": []})
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Failed to get onboarding status: {exc}", code="onboarding_failed"), status=500)
+
+    async def _handle_transcribe(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            reader = await request.multipart()
+            field = await reader.next()
+            if field is None or field.name != "file":
+                return web.json_response(_openai_error("file field required", code="missing_file"), status=400)
+            filename = getattr(field, "filename", "audio.ogg")
+            content = b""
+            while True:
+                chunk = await field.read_chunk()
+                if not chunk:
+                    break
+                content += chunk
+            import tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=filename, delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                from tools.transcription_tools import transcribe_audio
+                return web.json_response({"text": transcribe_audio(tmp_path)})
+            finally:
+                os.unlink(tmp_path)
+        except Exception as exc:
+            return web.json_response(_openai_error(f"Transcription failed: {exc}", code="transcribe_failed"), status=500)
 
     async def _sweep_orphaned_runs(self) -> None:
         """Periodically clean up run streams that were never consumed."""

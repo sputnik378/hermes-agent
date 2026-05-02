@@ -889,11 +889,19 @@ def switch_model(
             # "ollama-launch" that resolve_runtime_provider doesn't know), keep existing
             # credentials. Otherwise use the resolved values (picks up credential rotation,
             # base_url adjustments for OpenCode, etc.).
-            api_key = runtime.get("api_key", "")
-            base_url = runtime.get("base_url", "")
-            api_mode = runtime.get("api_mode", "")
-        except Exception:
-            pass
+            if runtime.get("provider") != "custom":
+                api_key = runtime.get("api_key", "")
+                base_url = runtime.get("base_url", "")
+                api_mode = runtime.get("api_mode", "")
+        except Exception as e:
+            provider_def = resolve_provider_full(current_provider, user_providers)
+            auth_type = getattr(provider_def, "auth_type", "") if provider_def is not None else ""
+            if auth_type in {"oauth_external", "oauth_device_code", "external_process"}:
+                return ModelSwitchResult(
+                    success=False, new_model=new_model, target_provider=target_provider,
+                    provider_label=provider_label, is_global=is_global,
+                    error_message=f"Could not resolve credentials for provider '{provider_label}': {e}",
+                )
 
     # --- Direct alias override: use exact base_url from the alias if set ---
     if resolved_alias:
