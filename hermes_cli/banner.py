@@ -151,27 +151,85 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
     return 0 if upstream_rev == local_rev else UPDATE_AVAILABLE_NO_COUNT
 
 
-def _check_via_local_git(repo_dir: Path) -> Optional[int]:
-    """Count commits behind origin/main in a local checkout."""
+def _git_ref_exists(repo_dir: Path, ref: str) -> bool:
+    """Return True when *ref* exists in the local git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True,
+            timeout=5,
+            cwd=str(repo_dir),
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _git_remote_exists(repo_dir: Path, remote: str) -> bool:
+    """Return True when *remote* is configured in the local git checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "remote"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode != 0:
+            return False
+        return remote in {line.strip() for line in result.stdout.splitlines()}
+    except Exception:
+        return False
+
+
+def _count_commits_behind(repo_dir: Path, remote: str, branch: str = "main") -> Optional[int]:
+    """Count commits HEAD is behind remote/branch, using stale refs if fetch fails."""
+    ref = f"{remote}/{branch}"
     try:
         subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
-            capture_output=True, timeout=10,
+            ["git", "fetch", remote, "--quiet"],
+            capture_output=True,
+            timeout=10,
             cwd=str(repo_dir),
         )
     except Exception:
         pass  # Offline or timeout — use stale refs, that's fine
 
+    if not _git_ref_exists(repo_dir, ref):
+        return None
+
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
-            capture_output=True, text=True, timeout=5,
+            ["git", "rev-list", "--count", f"HEAD..{ref}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
             cwd=str(repo_dir),
         )
         if result.returncode == 0:
             return int(result.stdout.strip())
     except Exception:
         pass
+    return None
+
+
+def _check_via_local_git(repo_dir: Path) -> Optional[int]:
+    """Count commits behind the canonical update remote in a local checkout.
+
+    Prefer upstream/main when an ``upstream`` remote is configured. This handles
+    customized forks where ``origin`` is the user's fork and the official Hermes
+    repo is configured as ``upstream``. Fall back to origin/main for normal
+    installs where origin is the official repo.
+    """
+    remotes = (
+        ["upstream", "origin"]
+        if _git_remote_exists(repo_dir, "upstream")
+        else ["origin"]
+    )
+    for remote in remotes:
+        behind = _count_commits_behind(repo_dir, remote)
+        if behind is not None:
+            return behind
     return None
 
 
