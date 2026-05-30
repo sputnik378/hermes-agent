@@ -5,6 +5,10 @@
 # Merges upstream NousResearch/hermes-agent into sputnik378/hermes-agent while
 # preserving Matt's customizations, then pushes the result to the fork.
 #
+# After merging, if pyproject.toml / uv.lock changed, it re-syncs the venv via
+# `uv pip install -e .` (using the venv's own uv-managed Python — insulated from
+# Homebrew/system Python breakage) and verifies the core import chain.
+#
 # Usage:
 #   ./scripts/matt-update.sh             # interactive (confirm before push)
 #   ./scripts/matt-update.sh --yes       # non-interactive (CI / 1-click)
@@ -181,6 +185,7 @@ fi
 # Merge
 # ---------------------------------------------------------------------------
 header "Merging upstream/main"
+OLD_HEAD="$(git rev-parse HEAD)"   # full hash, used for dep-diff and push summary
 MERGE_MSG="Merge upstream $(git describe --tags upstream/main 2>/dev/null || echo "$(date +%Y-%m-%d)") + Matt customizations"
 
 if git merge upstream/main --no-edit -m "$MERGE_MSG" 2>&1; then
@@ -219,12 +224,49 @@ done
 [[ $FAIL -eq 1 ]] && die "Syntax errors found. Fix them, then push manually."
 
 # ---------------------------------------------------------------------------
+# Dependency sync
+#
+# If the merge changed pyproject.toml or uv.lock, the venv's installed packages
+# may be stale. Re-run the editable install so the venv matches the new pins.
+# Uses the venv's own uv-managed Python (NOT system/Homebrew Python) so this
+# stays insulated from brew churn — the whole reason the venv was rebuilt.
+# ---------------------------------------------------------------------------
+header "Dependency sync"
+DEP_FILES_CHANGED="$(git diff --name-only "$OLD_HEAD"..HEAD -- pyproject.toml uv.lock setup.py setup.cfg 2>/dev/null)"
+VENV_PY="$REPO_DIR/venv/bin/python"
+
+if [[ -z "$DEP_FILES_CHANGED" ]]; then
+  success "No dependency files changed — venv is current."
+elif [[ ! -x "$VENV_PY" ]]; then
+  warn "Dependency files changed but no venv found at $REPO_DIR/venv"
+  warn "Rebuild manually: uv venv --managed-python venv && uv pip install -e ."
+else
+  info "Changed: $(echo "$DEP_FILES_CHANGED" | tr '\n' ' ')"
+  if command -v uv &>/dev/null; then
+    info "Syncing venv with uv pip install -e . ..."
+    if VIRTUAL_ENV="$REPO_DIR/venv" uv pip install -e . 2>&1 | tail -8; then
+      success "Dependencies synced."
+    else
+      warn "Dependency sync hit an error — review above. Code is merged; fix deps then push."
+    fi
+  else
+    warn "uv not on PATH — sync manually: VIRTUAL_ENV=$REPO_DIR/venv uv pip install -e ."
+  fi
+  # Sanity: the import chain that historically broke (pyexpat via prompt_toolkit)
+  if "$VENV_PY" -c "import pyexpat, prompt_toolkit" 2>/dev/null; then
+    success "Core import chain (pyexpat + prompt_toolkit) OK."
+  else
+    warn "Core import chain failed after sync — check the venv Python before running hermes."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Push to fork
 # ---------------------------------------------------------------------------
 header "Pushing to fork"
 if [[ $ASSUME_YES -eq 0 ]]; then
   NEW_HEAD="$(git rev-parse --short HEAD)"
-  info "About to push $ORIGIN_URL main ($OLD_HEAD → $NEW_HEAD)"
+  info "About to push $ORIGIN_URL main ($(git rev-parse --short "$OLD_HEAD") → $NEW_HEAD)"
   read -r -p "${YELLOW}Push to fork?${RESET} [y/N] " CONFIRM
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "Skipping push. Run: git push origin main"; exit 0; }
 fi
