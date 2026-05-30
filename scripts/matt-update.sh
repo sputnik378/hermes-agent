@@ -10,9 +10,14 @@
 # Homebrew/system Python breakage) and verifies the core import chain.
 #
 # Usage:
-#   ./scripts/matt-update.sh             # interactive (confirm before push)
-#   ./scripts/matt-update.sh --yes       # non-interactive (CI / 1-click)
-#   ./scripts/matt-update.sh --dry-run   # fetch + report, no merge or push
+#   ./scripts/matt-update.sh                # interactive (confirm before push)
+#   ./scripts/matt-update.sh --yes          # non-interactive (CI / 1-click)
+#   ./scripts/matt-update.sh --dry-run      # fetch + report, no merge or push
+#   ./scripts/matt-update.sh --allow-dirty  # auto-stash a dirty tree (default: refuse)
+#
+# By default the script REFUSES to run with uncommitted changes to tracked
+# files — commit or stash first. This avoids the auto-stash/pop conflict that
+# bites when you edit the script (or your customizations) while running it.
 #
 # Custom files watched for conflicts:
 #   hermes_cli/banner.py       (fork-aware update check + PyPI check)
@@ -35,10 +40,12 @@ cd "$REPO_DIR"
 # ---------------------------------------------------------------------------
 ASSUME_YES=0
 DRY_RUN=0
+ALLOW_DIRTY=0
 for arg in "$@"; do
   case "$arg" in
-    --yes|-y)    ASSUME_YES=1 ;;
-    --dry-run)   DRY_RUN=1 ;;
+    --yes|-y)      ASSUME_YES=1 ;;
+    --dry-run)     DRY_RUN=1 ;;
+    --allow-dirty) ALLOW_DIRTY=1 ;;
   esac
 done
 
@@ -71,21 +78,43 @@ info "Fork:     $ORIGIN_URL"
 info "Upstream: $UPSTREAM_URL"
 echo
 
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-[[ "$CURRENT_BRANCH" == "main" ]] || {
-  warn "Currently on branch '$CURRENT_BRANCH', switching to main..."
-  git checkout main
-}
-
-# Check for uncommitted changes
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  warn "Uncommitted changes detected — stashing..."
+# ---------------------------------------------------------------------------
+# Working-tree guard — fail fast on a dirty tree.
+#
+# The merge auto-stash/pop dance can conflict against merged changes (and will
+# happily stash edits to THIS script if you're editing it while running it).
+# Default behaviour is therefore to refuse to run unless the tree is clean.
+# Commit or stash your work first. `--allow-dirty` opts back into the old
+# auto-stash behaviour if you really want it.
+# ---------------------------------------------------------------------------
+DIRTY="$(git status --porcelain --untracked-files=no)"
+if [[ -n "$DIRTY" ]]; then
+  if [[ $ALLOW_DIRTY -eq 0 ]]; then
+    echo
+    warn "Working tree has uncommitted changes to tracked files:"
+    echo
+    git status --short --untracked-files=no | sed 's/^/    /'
+    echo
+    echo "  Commit or stash them before updating:"
+    echo "      git add -A && git commit -m '...'    # keep them"
+    echo "      git stash                            # shelve them"
+    echo
+    echo "  Or re-run with ${BOLD}--allow-dirty${RESET} to auto-stash (not recommended)."
+    die "Refusing to update a dirty tree."
+  fi
+  warn "Dirty tree + --allow-dirty: auto-stashing (you accept pop-conflict risk)..."
   STASH_REF="$(git stash create "matt-update pre-stash $(date +%Y%m%dT%H%M%S)")"
   git stash store -m "matt-update pre-stash" "$STASH_REF"
   STASHED=1
 else
   STASHED=0
 fi
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+[[ "$CURRENT_BRANCH" == "main" ]] || {
+  warn "Currently on branch '$CURRENT_BRANCH', switching to main..."
+  git checkout main
+}
 
 # ---------------------------------------------------------------------------
 # Snapshot
