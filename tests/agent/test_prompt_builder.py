@@ -276,6 +276,54 @@ class TestBuildSkillsSystemPrompt:
         # "search" should appear only once per category
         assert result.count("- search") == 1
 
+    def test_compact_categories_demoted_to_names_only(self, monkeypatch, tmp_path):
+        """Posture-driven demotion keeps every skill NAME visible.
+
+        Demoted categories lose their descriptions, never their entries —
+        full pruning caused silent capability loss in a real workflow
+        (agent-created skills are the model's project memory, and models
+        don't rediscover them via skills_list once the index goes quiet).
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for cat, name in (("social-media", "tweet-stuff"), ("github", "pr-review")):
+            d = tmp_path / "skills" / cat / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Does {name} things\n---\n"
+            )
+
+        result = build_skills_system_prompt(
+            compact_categories=frozenset({"social-media"})
+        )
+        # Coding-adjacent category keeps its full entry.
+        assert "pr-review" in result and "Does pr-review things" in result
+        # Demoted category: name stays visible, description is dropped.
+        assert "tweet-stuff" in result
+        assert "Does tweet-stuff things" not in result
+        assert "social-media [names only]" in result
+        # Disclosure note explains the demotion and how to load.
+        assert "skill_view" in result
+
+    def test_compact_categories_demote_nested_and_miss_cache_separately(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        d = tmp_path / "skills" / "social-media" / "twitter" / "thread-writer"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            "---\nname: thread-writer\ndescription: Write threads\n---\n"
+        )
+        # Nested category ("social-media/twitter") demoted via its parent:
+        # name visible, description gone.
+        compact = build_skills_system_prompt(
+            compact_categories=frozenset({"social-media"})
+        )
+        assert "thread-writer" in compact
+        assert "Write threads" not in compact
+        # Unfiltered call must not be served from the compacted cache entry.
+        full = build_skills_system_prompt()
+        assert "Write threads" in full
+
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -927,6 +975,29 @@ class TestEnvironmentHints:
         assert "Terminal backend: docker" in result
         assert "inside" in result.lower()
 
+    def test_build_environment_hints_uses_terminal_cwd_over_launch_dir(self, monkeypatch, tmp_path):
+        """THE BUG: gateway/cron set TERMINAL_CWD but the prompt emitted os.getcwd()
+        (the daemon launch dir). Regression for #24882/#24969/#27383/#29265."""
+        import agent.prompt_builder as _pb
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        configured = tmp_path / "workspace"
+        configured.mkdir()
+        monkeypatch.setenv("TERMINAL_CWD", str(configured))
+        monkeypatch.chdir(tmp_path)
+        _pb._clear_backend_probe_cache()
+        assert f"Current working directory: {configured}" in _pb.build_environment_hints()
+
+    def test_build_environment_hints_falls_back_to_launch_dir(self, monkeypatch, tmp_path):
+        """The #19242 local-CLI contract: no TERMINAL_CWD → the launch dir."""
+        import agent.prompt_builder as _pb
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        monkeypatch.chdir(tmp_path)
+        _pb._clear_backend_probe_cache()
+        assert f"Current working directory: {tmp_path}" in _pb.build_environment_hints()
+
     def test_build_environment_hints_uses_live_probe_when_available(self, monkeypatch):
         """When the probe succeeds, its output must appear in the hint block."""
         import agent.prompt_builder as _pb
@@ -1245,6 +1316,5 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
 

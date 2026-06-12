@@ -46,6 +46,7 @@ def test_get_git_banner_state_reads_origin_and_head(tmp_path):
     (repo_dir / ".git").mkdir(parents=True)
 
     results = {
+        ("git", "remote"): MagicMock(returncode=0, stdout="origin\n"),
         ("git", "rev-parse", "--short=8", "origin/main"): MagicMock(returncode=0, stdout="b2f477a3\n"),
         ("git", "rev-parse", "--short=8", "HEAD"): MagicMock(returncode=0, stdout="af8aad31\n"),
         ("git", "rev-list", "--count", "origin/main..HEAD"): MagicMock(returncode=0, stdout="3\n"),
@@ -61,6 +62,31 @@ def test_get_git_banner_state_reads_origin_and_head(tmp_path):
         state = banner.get_git_banner_state(repo_dir)
 
     assert state == {"upstream": "b2f477a3", "local": "af8aad31", "ahead": 3}
+
+
+def test_get_git_banner_state_prefers_upstream_remote_for_forks(tmp_path):
+    from hermes_cli import banner
+
+    repo_dir = tmp_path / "repo"
+    (repo_dir / ".git").mkdir(parents=True)
+
+    results = {
+        ("git", "remote"): MagicMock(returncode=0, stdout="origin\nupstream\n"),
+        ("git", "rev-parse", "--short=8", "upstream/main"): MagicMock(returncode=0, stdout="24f74eb8\n"),
+        ("git", "rev-parse", "--short=8", "HEAD"): MagicMock(returncode=0, stdout="d19cd004\n"),
+        ("git", "rev-list", "--count", "upstream/main..HEAD"): MagicMock(returncode=0, stdout="9\n"),
+    }
+
+    def fake_run(cmd, **kwargs):
+        key = tuple(cmd)
+        if key not in results:
+            raise AssertionError(f"unexpected command: {cmd}")
+        return results[key]
+
+    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+        state = banner.get_git_banner_state(repo_dir)
+
+    assert state == {"upstream": "24f74eb8", "local": "d19cd004", "ahead": 9}
 
 
 def test_get_git_banner_state_falls_back_to_build_sha_when_no_repo():
