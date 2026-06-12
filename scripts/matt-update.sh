@@ -163,7 +163,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo
   info "Dry-run mode — showing new upstream commits only, no merge performed."
   echo
-  git log --oneline HEAD..upstream/main | head -20
+  git log --oneline HEAD..upstream/main | sed -n '1,20p'
   TOTAL="$(git rev-list --count HEAD..upstream/main)"
   [[ $TOTAL -gt 20 ]] && echo "  ... and $((TOTAL - 20)) more"
   exit 0
@@ -173,7 +173,7 @@ fi
 # Show what's coming
 # ---------------------------------------------------------------------------
 header "New upstream commits ($BEHIND)"
-git log --oneline HEAD..upstream/main | head -20
+git log --oneline HEAD..upstream/main | sed -n '1,20p'
 TOTAL="$(git rev-list --count HEAD..upstream/main)"
 [[ $TOTAL -gt 20 ]] && echo "  ... and $((TOTAL - 20)) more"
 echo
