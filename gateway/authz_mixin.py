@@ -209,6 +209,11 @@ class GatewayAuthorizationMixin:
             chat_allowlist_env = {
                 Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
                 Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
+                # Signal historically used SIGNAL_GROUP_ALLOWED_USERS for group
+                # IDs. Treat it as a chat/group allowlist for group traffic so
+                # Ops channels authorize by approved room instead of fragile
+                # per-sender UUID/phone aliases.
+                Platform.SIGNAL: "SIGNAL_GROUP_ALLOWED_USERS",
             }.get(source.platform, "")
             if chat_allowlist_env:
                 raw_chat_allowlist = os.getenv(chat_allowlist_env, "").strip()
@@ -218,7 +223,10 @@ class GatewayAuthorizationMixin:
                         for cid in raw_chat_allowlist.split(",")
                         if cid.strip()
                     }
-                    if "*" in allowed_group_ids or source.chat_id in allowed_group_ids:
+                    chat_id_variants = {source.chat_id}
+                    if source.platform == Platform.SIGNAL and source.chat_id.startswith("group:"):
+                        chat_id_variants.add(source.chat_id.split("group:", 1)[1])
+                    if "*" in allowed_group_ids or bool(chat_id_variants & allowed_group_ids):
                         return True
 
         if not user_id:

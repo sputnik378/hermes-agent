@@ -64,6 +64,54 @@ header()  { echo; echo "${BOLD}$*${RESET}"; echo "${BOLD}$(printf '─%.0s' $(se
 # ---------------------------------------------------------------------------
 # Preflight checks
 # ---------------------------------------------------------------------------
+repair_hw_gateway_launchagent() {
+  local plist="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
+  local hw="$HOME/bin/hw"
+  [[ -x "$hw" && -f "$plist" ]] || return 0
+
+  python3 - "$plist" "$hw" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+plist = Path(sys.argv[1])
+hw = sys.argv[2]
+desired = [hw, "gateway", "run", "--replace"]
+
+try:
+    with plist.open("rb") as f:
+        data = plistlib.load(f)
+except Exception as exc:
+    print(f"⚠ Could not read gateway LaunchAgent: {exc}")
+    raise SystemExit(0)
+
+args = data.get("ProgramArguments") or []
+if args == desired:
+    print("✓ Gateway LaunchAgent already uses hw/BWS wrapper")
+    raise SystemExit(0)
+
+looks_like_stock_gateway = (
+    isinstance(args, list)
+    and "gateway" in args
+    and "run" in args
+    and any("hermes_cli.main" in str(part) for part in args)
+)
+if not looks_like_stock_gateway:
+    print("ℹ Gateway LaunchAgent has custom ProgramArguments; leaving unchanged")
+    raise SystemExit(0)
+
+data["ProgramArguments"] = desired
+data.pop("Program", None)
+try:
+    with plist.open("wb") as f:
+        plistlib.dump(data, f, sort_keys=False)
+except Exception as exc:
+    print(f"⚠ Could not write gateway LaunchAgent: {exc}")
+    raise SystemExit(0)
+print("✓ Gateway LaunchAgent restored to hw/BWS wrapper")
+PY
+}
+
 header "Hermes Fork Update"
 
 [[ -d ".git" ]] || die "Not a git repo: $REPO_DIR"
@@ -155,6 +203,7 @@ info "Behind:         $BEHIND commit(s)"
 
 if [[ $BEHIND -eq 0 ]]; then
   success "Already up to date with upstream."
+  repair_hw_gateway_launchagent
   [[ $STASHED -eq 1 ]] && git stash pop
   exit 0
 fi
@@ -315,6 +364,13 @@ UPDATE_CACHE="${HERMES_HOME:-$HOME/.hermes}/.update_check"
 # Clear BWS disk cache if it exists (secrets may have rotated)
 BWS_CACHE="${HERMES_HOME:-$HOME/.hermes}/cache/bws_cache.json"
 [[ -f "$BWS_CACHE" ]] && rm -f "$BWS_CACHE" && success "BWS disk cache cleared"
+
+# Preserve Matt's Keychain/BWS runtime injection for launchd-managed gateway.
+# The stock `hermes gateway start` path can rewrite the LaunchAgent to direct
+# Python, which starts cleanly but bypasses ~/bin/hw and therefore loses BWS
+# secrets. Restore only the known stock gateway pattern; leave custom plists
+# untouched.
+repair_hw_gateway_launchagent
 
 # Pop any pre-merge stash
 if [[ $STASHED -eq 1 ]]; then

@@ -8448,6 +8448,52 @@ def _discard_lockfile_churn(git_cmd, repo_root):
         pass
 
 
+def _run_local_fork_update_helper_if_available(args) -> bool:
+    """Delegate ``hermes update`` to a repo-local fork updater when present.
+
+    Matt's source install intentionally tracks a personal fork as ``origin``
+    and the official repository as ``upstream``.  The stock updater follows
+    ``origin`` and then refuses to sync from ``upstream`` when the fork has
+    carried commits, so routine ``hermes update`` runs report "up to date"
+    while official upstream is actually ahead.  The repo-local helper encodes
+    the merge/push/dependency-sync policy for that fork; wire the normal CLI
+    command to it so the user does not need to remember a separate script.
+    """
+    if os.environ.get("HERMES_UPDATE_DISABLE_LOCAL_HELPER") == "1":
+        return False
+    branch = getattr(args, "branch", None)
+    if branch not in (None, "", "main"):
+        return False
+    helper = PROJECT_ROOT / "scripts" / "matt-update.sh"
+    if not helper.is_file():
+        return False
+
+    git_cmd = ["git"]
+    origin_url = _get_origin_url(git_cmd, PROJECT_ROOT) or ""
+    if "sputnik378/hermes-agent" not in origin_url.lower():
+        return False
+    if not _has_upstream_remote(git_cmd, PROJECT_ROOT):
+        return False
+
+    cmd = [str(helper)]
+    if getattr(args, "check", False):
+        cmd.append("--dry-run")
+    assume_yes = bool(
+        getattr(args, "yes", False)
+        or getattr(args, "gateway", False)
+        or not (sys.stdin.isatty() and sys.stdout.isatty())
+    )
+    if assume_yes and "--dry-run" not in cmd:
+        cmd.append("--yes")
+
+    print("⚕ Updating Hermes Agent via local fork policy...")
+    print(f"→ Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+    return True
+
+
 def cmd_update(args):
     """Update Hermes Agent to the latest version.
 
@@ -8475,6 +8521,9 @@ def cmd_update(args):
     if detect_install_method(PROJECT_ROOT) == "docker":
         print(format_docker_update_message())
         sys.exit(1)
+
+    if _run_local_fork_update_helper_if_available(args):
+        return
 
     if getattr(args, "check", False):
         # --check honors --branch so the "any new commits?" answer matches

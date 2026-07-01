@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -309,3 +310,74 @@ def test_invalidate_update_cache_no_profiles_dir(tmp_path):
         _invalidate_update_cache()
 
     assert not (default_home / ".update_check").exists()
+
+
+def test_local_fork_update_helper_delegates_to_matt_script(tmp_path, monkeypatch):
+    """Matt's fork should make plain `hermes update -y` run the fork policy helper."""
+    import hermes_cli.main as main
+
+    helper = tmp_path / "scripts" / "matt-update.sh"
+    helper.parent.mkdir()
+    helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    helper.chmod(0o755)
+
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        main,
+        "_get_origin_url",
+        lambda git_cmd, cwd: "https://github.com/sputnik378/hermes-agent.git",
+    )
+    monkeypatch.setattr(main, "_has_upstream_remote", lambda git_cmd, cwd: True)
+
+    with patch("hermes_cli.main.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        handled = main._run_local_fork_update_helper_if_available(
+            SimpleNamespace(branch=None, check=False, yes=True, gateway=False)
+        )
+
+    assert handled is True
+    mock_run.assert_called_once_with([str(helper), "--yes"], cwd=tmp_path)
+
+
+def test_local_fork_update_helper_uses_dry_run_for_check(tmp_path, monkeypatch):
+    """`hermes update --check` should inspect the same upstream path without merging."""
+    import hermes_cli.main as main
+
+    helper = tmp_path / "scripts" / "matt-update.sh"
+    helper.parent.mkdir()
+    helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    helper.chmod(0o755)
+
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        main,
+        "_get_origin_url",
+        lambda git_cmd, cwd: "https://github.com/sputnik378/hermes-agent.git",
+    )
+    monkeypatch.setattr(main, "_has_upstream_remote", lambda git_cmd, cwd: True)
+
+    with patch("hermes_cli.main.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+        handled = main._run_local_fork_update_helper_if_available(
+            SimpleNamespace(branch=None, check=True, yes=False, gateway=False)
+        )
+
+    assert handled is True
+    mock_run.assert_called_once_with([str(helper), "--dry-run"], cwd=tmp_path)
+
+
+def test_local_fork_update_helper_skips_non_main_branch(tmp_path, monkeypatch):
+    """Explicit branch updates stay on the stock updater."""
+    import hermes_cli.main as main
+
+    helper = tmp_path / "scripts" / "matt-update.sh"
+    helper.parent.mkdir()
+    helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+
+    with patch("hermes_cli.main.subprocess.run") as mock_run:
+        handled = main._run_local_fork_update_helper_if_available(
+            SimpleNamespace(branch="feature", check=False, yes=True, gateway=False)
+        )
+
+    assert handled is False
+    mock_run.assert_not_called()
