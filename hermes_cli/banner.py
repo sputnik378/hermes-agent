@@ -192,20 +192,6 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
     return 0 if upstream_rev == local_rev else UPDATE_AVAILABLE_NO_COUNT
 
 
-def _git_ref_exists(repo_dir: Path, ref: str) -> bool:
-    """Return True when *ref* exists in the local git checkout."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", ref],
-            capture_output=True,
-            timeout=5,
-            cwd=str(repo_dir),
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def _git_remote_exists(repo_dir: Path, remote: str) -> bool:
     """Return True when *remote* is configured in the local git checkout."""
     try:
@@ -223,12 +209,22 @@ def _git_remote_exists(repo_dir: Path, remote: str) -> bool:
         return False
 
 
-def _count_commits_behind(repo_dir: Path, remote: str, branch: str = "main") -> Optional[int]:
+def _count_commits_behind(
+    repo_dir: Path,
+    remote: str,
+    branch: str = "main",
+    *,
+    is_shallow: bool = False,
+) -> Optional[int]:
     """Count commits HEAD is behind remote/branch, using stale refs if fetch fails."""
     ref = f"{remote}/{branch}"
     try:
+        fetch_args = ["git", "fetch", remote]
+        if is_shallow:
+            fetch_args += ["--depth", "1"]
+        fetch_args.append("--quiet")
         subprocess.run(
-            ["git", "fetch", remote, "--quiet"],
+            fetch_args,
             capture_output=True,
             timeout=10,
             cwd=str(repo_dir),
@@ -236,8 +232,18 @@ def _count_commits_behind(repo_dir: Path, remote: str, branch: str = "main") -> 
     except Exception:
         pass  # Offline or timeout — use stale refs, that's fine
 
-    if not _git_ref_exists(repo_dir, ref):
-        return None
+    if is_shallow:
+        # No history to count across the shallow boundary. `remote/main` may not
+        # be a tracking ref in a `clone --depth 1`, so prefer FETCH_HEAD (just
+        # updated by the fetch above) and fall back to remote/main.
+        head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
+        target_rev = (
+            _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
+            or _git_stdout(["rev-parse", ref], cwd=repo_dir)
+        )
+        if not head_rev or not target_rev:
+            return None
+        return 0 if head_rev == target_rev else UPDATE_AVAILABLE_NO_COUNT
 
     try:
         result = subprocess.run(
@@ -311,10 +317,20 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         origin_url = _git_stdout(["remote", "get-url", "origin"], cwd=repo_dir)
         if _is_official_ssh_remote(origin_url):
             head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
-            return _check_via_rev(head_rev) if head_rev else None
+            checked = _check_via_rev(head_rev) if head_rev else None
+            if checked == UPDATE_AVAILABLE_NO_COUNT:
+                return 1
+            return checked
         remotes = ["origin"]
+
+    # Installer checkouts are shallow (`git clone --depth 1`). On a shallow
+    # clone the history stops at a single commit, so preserve the boundary and
+    # compare tip SHAs instead of reporting a bogus large behind count.
+    shallow = _git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir)
+    is_shallow = shallow == "true"
+
     for remote in remotes:
-        behind = _count_commits_behind(repo_dir, remote)
+        behind = _count_commits_behind(repo_dir, remote, is_shallow=is_shallow)
         if behind is not None:
             return behind
     return None
@@ -610,7 +626,8 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
                          enabled_toolsets: List[str] = None,
                          session_id: str = None,
                          get_toolset_for_tool=None,
-                         context_length: int = None):
+                         context_length: int = None,
+                         provider: str = None):
     """Build and print a welcome banner with caduceus on left and info on right.
 
     Args:
@@ -622,6 +639,9 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         session_id: Session identifier.
         get_toolset_for_tool: Callable to map tool name -> toolset name.
         context_length: Model's context window size in tokens.
+        provider: Active provider id. When ``"moa"``, ``model`` is a MoA
+            preset name and the banner renders the aggregator instead of a
+            bare model slug.
     """
     from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
     from rich.panel import Panel
@@ -633,6 +653,18 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     enabled_toolsets = enabled_toolsets or []
 
     _, unavailable_toolsets = check_tool_availability(quiet=True)
+    # The availability check walks the GLOBAL toolset registry, so it includes
+    # toolsets that aren't part of this agent's platform set at all (e.g.
+    # `discord`, `feishu_doc` on a CLI session). Those must never surface in the
+    # banner's "Available Tools" — they aren't exposed to the agent. Restrict to
+    # toolsets actually enabled for this agent; a toolset that's enabled but
+    # currently has unmet deps legitimately shows as disabled/lazy below.
+    _enabled_ts = {str(t) for t in enabled_toolsets}
+    if _enabled_ts:
+        unavailable_toolsets = [
+            item for item in unavailable_toolsets
+            if str(item.get("id", item.get("name", ""))) in _enabled_ts
+        ]
     disabled_tools = set()
     # Tools whose toolset has a check_fn are lazy-initialized (e.g. honcho,
     # homeassistant) — they show as unavailable at banner time because the
@@ -666,13 +698,36 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         _bskin = None
         _hero = HERMES_CADUCEUS
     left_lines = ["", _hero, ""]
-    model_short = model.split("/")[-1] if "/" in model else model
-    if model_short.endswith(".gguf"):
-        model_short = model_short[:-5]
-    if len(model_short) > 28:
-        model_short = model_short[:25] + "..."
-    ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
-    left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]Nous Research[/]")
+    if (provider or "").strip().lower() == "moa":
+        # MoA virtual provider: ``model`` is a preset name. Show the preset and
+        # its aggregator so the banner is meaningful instead of a bare slug.
+        preset_name = model
+        agg_label = ""
+        try:
+            from hermes_cli.config import load_config
+            from hermes_cli.moa_config import normalize_moa_config
+
+            _moa = normalize_moa_config(load_config().get("moa") or {})
+            _preset = _moa.get("presets", {}).get(preset_name)
+            if _preset:
+                _agg = _preset.get("aggregator") or {}
+                _am = str(_agg.get("model") or "")
+                agg_label = _am.split("/")[-1] if "/" in _am else _am
+        except Exception:
+            agg_label = ""
+        if len(preset_name) > 28:
+            preset_name = preset_name[:25] + "..."
+        agg_str = f" [dim {dim}]·[/] [dim {dim}]agg {agg_label}[/]" if agg_label else ""
+        ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
+        left_lines.append(f"[{accent}]MoA: {preset_name}[/]{agg_str}{ctx_str} [dim {dim}]·[/] [dim {dim}]Nous Research[/]")
+    else:
+        model_short = model.split("/")[-1] if "/" in model else model
+        if model_short.endswith(".gguf"):
+            model_short = model_short[:-5]
+        if len(model_short) > 28:
+            model_short = model_short[:25] + "..."
+        ctx_str = f" [dim {dim}]·[/] [dim {dim}]{_format_context_length(context_length)} context[/]" if context_length else ""
+        left_lines.append(f"[{accent}]{model_short}[/]{ctx_str} [dim {dim}]·[/] [dim {dim}]Nous Research[/]")
 
     if os.getenv("HERMES_YOLO_MODE"):
         left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
@@ -780,10 +835,21 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
 
     right_lines.append("")
     right_lines.append(f"[bold {accent}]Available Skills[/]")
-    skills_by_category = get_available_skills()
-    total_skills = sum(len(s) for s in skills_by_category.values())
+    # The skills catalog is only reachable when the `skills` toolset is enabled
+    # (it exposes skill_view / skill_manage). When it's disabled — e.g. a Blank
+    # Slate install — the agent literally cannot load any skill, so advertising
+    # the on-disk catalog here is misleading. Reflect the real state instead.
+    _skills_enabled = (not _enabled_ts) or ("skills" in _enabled_ts)
+    if _skills_enabled:
+        skills_by_category = get_available_skills()
+        total_skills = sum(len(s) for s in skills_by_category.values())
+    else:
+        skills_by_category = {}
+        total_skills = 0
 
-    if skills_by_category:
+    if not _skills_enabled:
+        right_lines.append(f"[dim {dim}]Skills toolset disabled[/]")
+    elif skills_by_category:
         for category in sorted(skills_by_category.keys()):
             skill_names = sorted(skills_by_category[category])
             if len(skill_names) > 8:

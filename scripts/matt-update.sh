@@ -203,7 +203,16 @@ info "Behind:         $BEHIND commit(s)"
 
 if [[ $BEHIND -eq 0 ]]; then
   success "Already up to date with upstream."
-  repair_hw_gateway_launchagent
+  if [[ $DRY_RUN -eq 0 ]]; then
+    ORIGIN_BEHIND_LOCAL="$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)"
+    if [[ "$ORIGIN_BEHIND_LOCAL" -gt 0 ]]; then
+      header "Pushing to fork"
+      info "Local main is $ORIGIN_BEHIND_LOCAL commit(s) ahead of origin/main"
+      git push origin main
+      success "Fork updated: $ORIGIN_URL"
+    fi
+    repair_hw_gateway_launchagent
+  fi
   [[ $STASHED -eq 1 ]] && git stash pop
   exit 0
 fi
