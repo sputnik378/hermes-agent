@@ -239,12 +239,15 @@ def _find_listener_pid(port: int) -> int | None:
     lsof = shutil.which("lsof")
     if not lsof:
         return None
-    result = subprocess.run(
-        [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-        text=True,
-        capture_output=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     for line in result.stdout.splitlines():

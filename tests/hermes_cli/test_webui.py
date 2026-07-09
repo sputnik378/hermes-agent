@@ -41,6 +41,19 @@ def test_ensure_env_defaults_preserves_secrets_and_merges_cors(webui_mod, monkey
     assert info["webui_url"] == "http://127.0.0.1:8787"
 
 
+def test_find_listener_pid_returns_none_when_lsof_times_out(webui_mod, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(webui_mod.shutil, "which", lambda name: "/usr/sbin/lsof")
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=10)
+
+    monkeypatch.setattr(webui_mod.subprocess, "run", timeout)
+
+    assert webui_mod._find_listener_pid(8787) is None
+
+
 def test_stop_webui_only_stops_gateway_when_marker_exists(webui_mod, monkeypatch, capsys):
     called = {"gateway": 0, "pid": []}
 
