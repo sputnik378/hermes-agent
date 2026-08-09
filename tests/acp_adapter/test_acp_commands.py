@@ -20,6 +20,7 @@ class FakeAgent:
         self.steers = []
         self.redirects = []
         self.runs = []
+        self.stream_delta_callback = None
 
     def steer(self, text):
         self.steers.append(text)
@@ -139,6 +140,32 @@ async def test_acp_steer_slash_command_injects_into_running_agent():
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_acp_disable_streaming_env_uses_final_response_path(monkeypatch):
+    """Clients that cannot publish ACP deltas can request one final message update."""
+    monkeypatch.setenv("HERMES_ACP_DISABLE_STREAMING", "1")
+    acp_agent, state, fake, conn = make_agent_and_state()
+    observed = {}
+    original_run = fake.run_conversation
+
+    def run_conversation(**kwargs):
+        observed["stream_callback"] = fake.stream_delta_callback
+        if callable(fake.stream_delta_callback):
+            fake.stream_delta_callback("streamed: ping")
+        return original_run(**kwargs)
+
+    fake.run_conversation = run_conversation
+
+    response = await acp_agent.prompt(
+        session_id=state.session_id,
+        prompt=[TextContentBlock(type="text", text="ping")],
+    )
+
+    assert response.stop_reason == "end_turn"
+    assert observed["stream_callback"] is None
+    assert any("ran: ping" in str(update) for _session_id, update in conn.updates)
 
 
 @pytest.mark.asyncio

@@ -1828,7 +1828,15 @@ class HermesACPAgent(acp.Agent):
         agent.thinking_callback = None
         agent.reasoning_callback = reasoning_cb
         agent.step_callback = step_cb
-        agent.stream_delta_callback = stream_delta_cb
+        # Buzz Desktop 0.5.4 consumes the final ACP message but does not publish
+        # streamed AgentMessageChunk deltas to its relay.  Its launcher can opt
+        # into the single-final-response path without degrading streaming for
+        # other ACP clients such as Zed.
+        agent.stream_delta_callback = (
+            None
+            if os.environ.get("HERMES_ACP_DISABLE_STREAMING", "").strip() == "1"
+            else stream_delta_cb
+        )
 
         # Approval callback is per-thread (thread-local, GHSA-qg5c-hvr5-hjgr).
         # Set it INSIDE _run_agent so the TLS write happens in the executor
