@@ -2238,8 +2238,43 @@ def _update_preflight_handled(args) -> bool:
     return False
 
 
+def _run_local_fork_update_helper_if_available(args) -> bool:
+    """Delegate default-branch updates of Matt's fork to its local policy script."""
+    if os.environ.get("HERMES_UPDATE_DISABLE_LOCAL_HELPER") == "1":
+        return False
+    if getattr(args, "branch", None) not in (None, "", "main"):
+        return False
+    helper = PROJECT_ROOT / "scripts" / "matt-update.sh"
+    if not helper.is_file():
+        return False
+
+    # These functions live in the frozen updater's git module. Importing them
+    # here avoids relying on main's lazy module-level attribute bridge.
+    from hermes_cli.update_cmd_git import _get_origin_url, _has_upstream_remote
+
+    git_cmd = ["git"]
+    origin_url = _get_origin_url(git_cmd, PROJECT_ROOT) or ""
+    if "sputnik378/hermes-agent" not in origin_url.lower() or not _has_upstream_remote(git_cmd, PROJECT_ROOT):
+        return False
+
+    cmd = [str(helper)]
+    if getattr(args, "check", False):
+        cmd.append("--dry-run")
+    elif (getattr(args, "yes", False) or getattr(args, "gateway", False)
+          or not (sys.stdin.isatty() and sys.stdout.isatty())):
+        cmd.append("--yes")
+    print("⚕ Updating Hermes Agent via local fork policy...")
+    print(f"→ Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+    if result.returncode:
+        sys.exit(result.returncode)
+    return True
+
+
 def cmd_update(args):
     """Update Hermes Agent: hangup protection + update lock around ``_cmd_update_impl``."""
+    if _run_local_fork_update_helper_if_available(args):
+        return
     if _update_preflight_handled(args):
         return
     gateway_mode = getattr(args, "gateway", False)
