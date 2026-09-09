@@ -10074,10 +10074,10 @@ def _run_local_fork_update_helper_if_available(args) -> bool:
         return False
 
     git_cmd = ["git"]
-    origin_url = _get_origin_url(git_cmd, PROJECT_ROOT) or ""
+    origin_url = _self()._get_origin_url(git_cmd, PROJECT_ROOT) or ""
     if "sputnik378/hermes-agent" not in origin_url.lower():
         return False
-    if not _has_upstream_remote(git_cmd, PROJECT_ROOT):
+    if not _self()._has_upstream_remote(git_cmd, PROJECT_ROOT):
         return False
 
     cmd = [str(helper)]
@@ -10149,9 +10149,6 @@ def cmd_update(args):
     if is_nix_install_method(install_method) or install_method == "apt":
         print(recommended_update_command_for_method(install_method))
         sys.exit(1)
-
-    if _run_local_fork_update_helper_if_available(args):
-        return
 
     if _run_local_fork_update_helper_if_available(args):
         return

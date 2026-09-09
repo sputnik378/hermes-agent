@@ -431,6 +431,39 @@ def test_local_fork_update_helper_delegates_to_matt_script(tmp_path, monkeypatch
     mock_run.assert_called_once_with([str(helper), "--yes"], cwd=tmp_path)
 
 
+def test_local_fork_update_helper_resolves_lazy_update_helpers(tmp_path, monkeypatch):
+    """Fork policy must work before update_cmd's lazy exports have been loaded."""
+    import hermes_cli.main as main
+
+    helper = tmp_path / "scripts" / "matt-update.sh"
+    helper.parent.mkdir()
+    helper.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    helper.chmod(0o755)
+
+    monkeypatch.setattr(main, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delattr(main, "_get_origin_url", raising=False)
+    monkeypatch.delattr(main, "_has_upstream_remote", raising=False)
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return MagicMock(
+                returncode=0,
+                stdout="https://github.com/sputnik378/hermes-agent.git\n",
+            )
+        if cmd == ["git", "remote", "get-url", "upstream"]:
+            return MagicMock(returncode=0, stdout="")
+        if cmd == [str(helper), "--yes"]:
+            return MagicMock(returncode=0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        handled = main._run_local_fork_update_helper_if_available(
+            SimpleNamespace(branch=None, check=False, yes=True, gateway=False)
+        )
+
+    assert handled is True
+
+
 def test_local_fork_update_helper_uses_dry_run_for_check(tmp_path, monkeypatch):
     """`hermes update --check` should inspect the same upstream path without merging."""
     import hermes_cli.main as main
